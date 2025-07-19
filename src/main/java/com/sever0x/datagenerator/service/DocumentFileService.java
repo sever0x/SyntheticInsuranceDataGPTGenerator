@@ -2,8 +2,8 @@ package com.sever0x.datagenerator.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sever0x.datagenerator.data.DocumentData;
-import com.sever0x.datagenerator.types.DocumentType;
 import com.sever0x.datagenerator.data.InsuranceEntities;
+import com.sever0x.datagenerator.types.DocumentType;
 import jakarta.annotation.PostConstruct;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -17,12 +17,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 @Setter
 @Slf4j
@@ -77,7 +73,6 @@ public class DocumentFileService {
 			Files.writeString(filePath, conllContent, StandardCharsets.UTF_8);
 			log.debug("Saved annotated data: {}", fileName);
 			return filePath.toString();
-
 		} catch (IOException e) {
 			log.error("Failed to save annotated document {}", fileName, e);
 			throw new RuntimeException("Annotation save failed", e);
@@ -112,44 +107,62 @@ public class DocumentFileService {
 		String[] labels = new String[tokens.length];
 		Arrays.fill(labels, "O");
 
-		// Find entities in tokens
-		assignEntityLabels(tokens, labels, entities.getContractNumbers(), "CONTRACT_NUMBER");
-		assignEntityLabels(tokens, labels, entities.getCustomerIds(), "CUSTOMER_ID");
-		assignEntityLabels(tokens, labels, entities.getCompanyNames(), "COMPANY_NAME");
-		assignEntityLabels(tokens, labels, entities.getPersonNames(), "PERSON_NAME");
+		// Use original sentence for accurate position mapping
+		assignEntityLabelsWithPositions(tokens, labels, originalSentence, entities.getContractNumbers(), "CONTRACT_NUMBER");
+		assignEntityLabelsWithPositions(tokens, labels, originalSentence, entities.getCustomerIds(), "CUSTOMER_ID");
+		assignEntityLabelsWithPositions(tokens, labels, originalSentence, entities.getCompanyNames(), "COMPANY_NAME");
+		assignEntityLabelsWithPositions(tokens, labels, originalSentence, entities.getPersonNames(), "PERSON_NAME");
 
 		return labels;
 	}
 
-	private void assignEntityLabels(String[] tokens, String[] labels, List<String> entities, String entityType) {
+	private void assignEntityLabelsWithPositions(String[] tokens, String[] labels, String originalSentence, List<String> entities, String entityType) {
 		for (String entity : entities) {
-			String[] entityTokens = entity.split("\\s+");
+			int entityStart = originalSentence.indexOf(entity);
+			if (entityStart == -1) continue;
 
-			// Find matching token sequences
-			for (int i = 0; i <= tokens.length - entityTokens.length; i++) {
-				if (matchesEntityTokens(tokens, i, entityTokens)) {
-					if (entityTokens.length == 1) {
-						labels[i] = "S-" + entityType;
-					} else {
-						labels[i] = "B-" + entityType;
-						for (int j = 1; j < entityTokens.length; j++) {
-							if (i + j < labels.length) {
-								labels[i + j] = "I-" + entityType;
-							}
-						}
+			// Find corresponding tokens for this entity position
+			int[] tokenRange = findTokensForPosition(tokens, originalSentence, entityStart, entity.length());
+			if (tokenRange[0] != -1 && tokenRange[1] != -1) {
+				// Assign BIO labels
+				if (tokenRange[0] == tokenRange[1]) {
+					labels[tokenRange[0]] = "S-" + entityType;
+				} else {
+					labels[tokenRange[0]] = "B-" + entityType;
+					for (int i = tokenRange[0] + 1; i <= tokenRange[1]; i++) {
+						labels[i] = "I-" + entityType;
 					}
-					break;
 				}
 			}
 		}
 	}
 
-	private boolean matchesEntityTokens(String[] tokens, int startIndex, String[] entityTokens) {
-		for (int i = 0; i < entityTokens.length; i++) {
-			if (startIndex + i >= tokens.length) return false;
-			if (!tokens[startIndex + i].equalsIgnoreCase(entityTokens[i])) return false;
+	private int[] findTokensForPosition(String[] tokens, String originalSentence, int start, int length) {
+		// Map character positions to token indices
+		int charPos = 0;
+		int startToken = -1, endToken = -1;
+
+		for (int i = 0; i < tokens.length; i++) {
+			// Skip whitespace
+			while (charPos < originalSentence.length() && Character.isWhitespace(originalSentence.charAt(charPos))) {
+				charPos++;
+			}
+
+			int tokenStart = charPos;
+			int tokenEnd = charPos + tokens[i].length();
+
+			// Check if this token overlaps with entity
+			if (startToken == -1 && tokenEnd > start) {
+				startToken = i;
+			}
+			if (tokenStart < start + length) {
+				endToken = i;
+			}
+
+			charPos = tokenEnd;
 		}
-		return true;
+
+		return new int[]{startToken, endToken};
 	}
 
 	public void saveByType(String content, DocumentType docType, int documentId) {
@@ -242,22 +255,6 @@ public class DocumentFileService {
 		return basePath;
 	}
 
-	public Path getTrainingDataPath() {
-		return Paths.get(basePath, "training_data");
-	}
-
-	public List<String> getAllDocumentPaths() {
-		Path documentsPath = Paths.get(basePath, "raw_documents");
-		try (Stream<Path> paths = Files.list(documentsPath)) {
-			return paths.map(Path::toString)
-					.sorted()
-					.collect(Collectors.toList());
-		} catch (IOException e) {
-			log.error("Failed to list document paths", e);
-			return Collections.emptyList();
-		}
-	}
-
 	public void exportForFlair() {
 		Path flairPath = Paths.get(basePath, "flair_ready");
 		try {
@@ -270,39 +267,6 @@ public class DocumentFileService {
 
 		} catch (IOException e) {
 			log.error("Failed to export for Flair", e);
-		}
-	}
-
-	public void createZipArchive() {
-		String zipFileName = String.format("insurance_ner_dataset_%s.zip", LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")));
-		Path zipPath = Paths.get(basePath).getParent().resolve(zipFileName);
-
-		try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zipPath))) {
-			addDirectoryToZip(Paths.get(basePath), basePath, zos);
-			log.info("Created dataset archive: {}", zipPath);
-		} catch (IOException e) {
-			log.error("Failed to create zip archive", e);
-		}
-	}
-
-	private void addDirectoryToZip(Path directory, String basePath, ZipOutputStream zos) throws IOException {
-		try (Stream<Path> paths = Files.walk(directory)) {
-			paths.forEach(path -> {
-				try {
-					String zipEntryName = Paths.get(basePath).relativize(path).toString().replace("\\", "/");
-					if (Files.isDirectory(path)) {
-						zipEntryName += "/";
-					}
-					ZipEntry zipEntry = new ZipEntry(zipEntryName);
-					zos.putNextEntry(zipEntry);
-					if (Files.isRegularFile(path)) {
-						Files.copy(path, zos);
-					}
-					zos.closeEntry();
-				} catch (IOException e) {
-					log.error("Error adding file to zip: {}", path, e);
-				}
-			});
 		}
 	}
 
