@@ -44,6 +44,7 @@ public class DocumentFileService {
 			Files.createDirectories(Paths.get(basePath, "training_data"));
 			Files.createDirectories(Paths.get(basePath, "statistics"));
 			Files.createDirectories(Paths.get(basePath, "by_type"));
+			Files.createDirectories(Paths.get(basePath, "flair_ready"));
 
 			log.info("Created directory structure at: {}", basePath);
 
