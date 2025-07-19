@@ -1,0 +1,14 @@
+spring:
+  application:
+    name: SyntheticInsuranceDataGPTGenerator
+  main:
+    web-application-type: none
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY}
+      chat:
+        options:
+          model: gpt-4.1-nano
+dataset:
+  size: 50
+  output-path: ./generated-dataset
